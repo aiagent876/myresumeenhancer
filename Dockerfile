@@ -21,9 +21,6 @@ RUN apt-get update && apt-get install -y \
 # Copy the rest of the application code
 COPY . .
 
-# Copy the .env file
-COPY .env .
-
 # Copy the templates directory
 COPY templates ./templates
 
