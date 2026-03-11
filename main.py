@@ -6,6 +6,7 @@ import os
 import tempfile
 import shutil
 from pathlib import Path
+import re
 import PyPDF2
 from io import BytesIO
 from dotenv import load_dotenv
@@ -24,6 +25,21 @@ TEMPLATE_DIR = os.path.join(os.getcwd(), "templates")
 
 # Debug: Print the template directory path
 print("Debug: Template Directory:", TEMPLATE_DIR)
+
+MAX_LATEX_SIZE_BYTES = 250_000
+MAX_OUTPUT_PDF_BYTES = 5_000_000
+COMPILE_TIMEOUT_SECONDS = 20
+MAX_COMPILE_RUNS = 2
+
+DISALLOWED_LATEX_PATTERNS = [
+    (r"\\write18\\b", "\\write18 is not allowed."),
+    (r"\\immediate\\s*\\write18\\b", "Immediate shell write is not allowed."),
+    (r"\\openout\\b", "Writing files from LaTeX is not allowed."),
+    (r"\\input\\s*\|", "Piped input commands are not allowed."),
+    (r"\\include\\s*\|", "Piped include commands are not allowed."),
+    (r"\\(?:input|include)\s*\{\s*(?:/|[A-Za-z]:|\\\\)", "Absolute external paths are not allowed."),
+    (r"\\(?:input|include)\s*\{\s*\.\.", "Parent-directory includes are not allowed."),
+]
 
 # Function to call Gemini API
 def call_gemini_api(prompt):
@@ -60,6 +76,11 @@ def call_gemini_api(prompt):
 
 # Function to compile LaTeX to PDF in an isolated environment
 def compile_latex_to_pdf(latex_content):
+    validation_error = validate_latex_for_compilation(latex_content)
+    if validation_error:
+        st.error(f"Blocked unsafe LaTeX content: {validation_error}")
+        return None
+
     # Create a temporary directory for compilation
     with tempfile.TemporaryDirectory() as temp_dir:
         # Write LaTeX content to a file
@@ -77,15 +98,20 @@ def compile_latex_to_pdf(latex_content):
         
         # Compile LaTeX to PDF
         try:
-            # Change to the temporary directory
-            original_dir = os.getcwd()
-            os.chdir(temp_dir)
-            
             # Run pdflatex twice to resolve references
-            for _ in range(2):
+            for _ in range(MAX_COMPILE_RUNS):
                 result = subprocess.run(
-                    ["pdflatex", "-interaction=nonstopmode", "resume.tex"],
-                    capture_output=True, text=True
+                    [
+                        "pdflatex",
+                        "-interaction=nonstopmode",
+                        "-halt-on-error",
+                        "-no-shell-escape",
+                        "resume.tex",
+                    ],
+                    cwd=temp_dir,
+                    capture_output=True,
+                    text=True,
+                    timeout=COMPILE_TIMEOUT_SECONDS,
                 )
             
             # Debug: Print the pdflatex output
@@ -95,16 +121,15 @@ def compile_latex_to_pdf(latex_content):
             # Check if PDF was generated
             pdf_path = Path(temp_dir) / "resume.pdf"
             if result.returncode == 0 and pdf_path.exists():
+                pdf_size = pdf_path.stat().st_size
+                if pdf_size > MAX_OUTPUT_PDF_BYTES:
+                    st.error("Generated PDF is too large and was blocked.")
+                    return None
+
                 with open(pdf_path, "rb") as pdf_file:
                     pdf_data = BytesIO(pdf_file.read())
-                
-                # Return to original directory
-                os.chdir(original_dir)
                 return pdf_data
             else:
-                # Return to original directory
-                os.chdir(original_dir)
-                
                 st.error("PDF compilation failed. Check LaTeX code for errors.")
                 # Show meaningful error message from pdflatex output
                 error_output = result.stdout
@@ -114,11 +139,24 @@ def compile_latex_to_pdf(latex_content):
                 else:
                     st.text(error_output[-2000:] if error_output else "No error output captured")
                 return None
+        except subprocess.TimeoutExpired:
+            st.error("PDF compilation timed out due to resource limits.")
+            return None
         except Exception as e:
-            # Make sure we return to the original directory
-            os.chdir(original_dir)
             st.error(f"Error during PDF compilation: {e}")
             return None
+
+
+def validate_latex_for_compilation(latex_content):
+    latex_size = len(latex_content.encode("utf-8"))
+    if latex_size > MAX_LATEX_SIZE_BYTES:
+        return "Input LaTeX is too large."
+
+    for pattern, message in DISALLOWED_LATEX_PATTERNS:
+        if re.search(pattern, latex_content, flags=re.IGNORECASE):
+            return message
+
+    return None
 
 # Load templates
 def load_template(template_name):
