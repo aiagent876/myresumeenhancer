@@ -5,6 +5,7 @@ import subprocess
 import os
 import tempfile
 import shutil
+import time
 from pathlib import Path
 import PyPDF2
 from io import BytesIO
@@ -43,20 +44,118 @@ def call_gemini_api(prompt):
     print("Debug: API URL:", url)
     print("Debug: API Payload:", data)
 
-    try:
-        response = requests.post(url, json=data, headers=headers)
-        # Debug: Print the API response status code and content
-        print("Debug: API Response Status Code:", response.status_code)
-        print("Debug: API Response Content:", response.json())
+    timeout_seconds = 30
+    max_attempts = 4
+    backoff_base_seconds = 1
 
-        if response.status_code == 200:
-            return response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        else:
-            st.error(f"Error calling Gemini API: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        st.error(f"Error during API call: {e}")
-        return None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            response = requests.post(url, json=data, headers=headers, timeout=timeout_seconds)
+            print("Debug: API Response Status Code:", response.status_code)
+
+            if response.status_code in (429,) or 500 <= response.status_code < 600:
+                if attempt < max_attempts:
+                    delay = backoff_base_seconds * (2 ** (attempt - 1))
+                    time.sleep(delay)
+                    continue
+                return {
+                    "success": False,
+                    "message": f"Gemini API returned transient error {response.status_code} after retries.",
+                    "details": {
+                        "status_code": response.status_code,
+                        "response_text": response.text,
+                        "attempts": attempt,
+                    },
+                }
+
+            if response.status_code != 200:
+                return {
+                    "success": False,
+                    "message": f"Gemini API request failed with status {response.status_code}.",
+                    "details": {
+                        "status_code": response.status_code,
+                        "response_text": response.text,
+                    },
+                }
+
+            try:
+                payload = response.json()
+                print("Debug: API Response Content:", payload)
+            except ValueError:
+                return {
+                    "success": False,
+                    "message": "Gemini API returned malformed JSON.",
+                    "details": {
+                        "status_code": response.status_code,
+                        "response_text": response.text,
+                    },
+                }
+
+            candidates = payload.get("candidates")
+            if not isinstance(candidates, list) or not candidates:
+                return {
+                    "success": False,
+                    "message": "Gemini API response is missing a valid 'candidates' field.",
+                    "details": {"payload": payload},
+                }
+
+            try:
+                text = candidates[0]["content"]["parts"][0]["text"]
+            except (KeyError, IndexError, TypeError):
+                return {
+                    "success": False,
+                    "message": "Gemini API response candidates are missing expected content text.",
+                    "details": {"payload": payload},
+                }
+
+            return {
+                "success": True,
+                "message": "Gemini content generated successfully.",
+                "details": {"text": text, "attempts": attempt},
+            }
+
+        except requests.exceptions.Timeout as e:
+            if attempt < max_attempts:
+                delay = backoff_base_seconds * (2 ** (attempt - 1))
+                time.sleep(delay)
+                continue
+            return {
+                "success": False,
+                "message": "Gemini API request timed out.",
+                "details": {"error": str(e), "attempts": attempt},
+            }
+        except requests.exceptions.ConnectionError as e:
+            if attempt < max_attempts:
+                delay = backoff_base_seconds * (2 ** (attempt - 1))
+                time.sleep(delay)
+                continue
+            return {
+                "success": False,
+                "message": "Unable to connect to Gemini API.",
+                "details": {"error": str(e), "attempts": attempt},
+            }
+        except requests.exceptions.RequestException as e:
+            return {
+                "success": False,
+                "message": "Error during Gemini API request.",
+                "details": {"error": str(e), "attempt": attempt},
+            }
+
+
+def extract_latex_error_context(log_output):
+    lines = log_output.splitlines()
+    fatal_idx = next(
+        (i for i, line in enumerate(lines) if line.strip().startswith("!")),
+        None,
+    )
+
+    if fatal_idx is None:
+        return "LaTeX compilation failed without an explicit fatal marker. Review full logs below."
+
+    start = max(0, fatal_idx - 2)
+    end = min(len(lines), fatal_idx + 4)
+    snippet = "\n".join(lines[start:end]).strip()
+    return snippet or "A LaTeX fatal error occurred. Review full logs below."
 
 # Function to compile LaTeX to PDF in an isolated environment
 def compile_latex_to_pdf(latex_content):
@@ -100,25 +199,34 @@ def compile_latex_to_pdf(latex_content):
                 
                 # Return to original directory
                 os.chdir(original_dir)
-                return pdf_data
+                return {
+                    "success": True,
+                    "message": "PDF compiled successfully.",
+                    "details": {"pdf_data": pdf_data, "log": result.stdout},
+                }
             else:
                 # Return to original directory
                 os.chdir(original_dir)
                 
-                st.error("PDF compilation failed. Check LaTeX code for errors.")
-                # Show meaningful error message from pdflatex output
-                error_output = result.stdout
-                error_lines = [line for line in error_output.split('\n') if "Error:" in line or "Fatal error" in line]
-                if error_lines:
-                    st.text("\n".join(error_lines))
-                else:
-                    st.text(error_output[-2000:] if error_output else "No error output captured")
-                return None
+                error_output = "\n".join(part for part in [result.stdout, result.stderr] if part)
+                concise_error = extract_latex_error_context(error_output)
+                return {
+                    "success": False,
+                    "message": "PDF compilation failed due to LaTeX errors.",
+                    "details": {
+                        "concise_error": concise_error,
+                        "full_log": error_output or "No output captured.",
+                        "return_code": result.returncode,
+                    },
+                }
         except Exception as e:
             # Make sure we return to the original directory
             os.chdir(original_dir)
-            st.error(f"Error during PDF compilation: {e}")
-            return None
+            return {
+                "success": False,
+                "message": "Error during PDF compilation.",
+                "details": {"error": str(e)},
+            }
 
 # Load templates
 def load_template(template_name):
@@ -239,8 +347,9 @@ if uploaded_file:
             print("Debug: Prompt Sent to API:", prompt)
 
             with st.spinner("Enhancing your resume... This may take a minute."):
-                enhanced_resume = call_gemini_api(prompt)
-                if enhanced_resume:
+                enhanced_resume_result = call_gemini_api(prompt)
+                if enhanced_resume_result["success"]:
+                    enhanced_resume = enhanced_resume_result["details"]["text"]
                     # Clean up the LaTeX code
                     clean_resume = clean_latex_code(enhanced_resume)
                     
@@ -257,10 +366,11 @@ if uploaded_file:
                     
                     # Compile the LaTeX code to PDF
                     with st.spinner("Compiling PDF..."):
-                        pdf_data = compile_latex_to_pdf(clean_resume)
+                        compile_result = compile_latex_to_pdf(clean_resume)
                         
-                    if pdf_data:
-                        st.success("PDF compiled successfully!")
+                    if compile_result["success"]:
+                        pdf_data = compile_result["details"]["pdf_data"]
+                        st.success(compile_result["message"])
                         st.download_button(
                             label="📥 Download Enhanced Resume (PDF)",
                             data=pdf_data,
@@ -278,6 +388,11 @@ if uploaded_file:
                         pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="700" height="1000" type="application/pdf"></iframe>'
                         st.markdown(pdf_display, unsafe_allow_html=True)
                     else:
-                        st.error("Failed to compile PDF. Please check for LaTeX errors.")
+                        st.error(compile_result["message"])
+                        st.code(compile_result["details"].get("concise_error", "No concise error found."), language="text")
+                        with st.expander("View full LaTeX compilation logs"):
+                            st.text(compile_result["details"].get("full_log", "No logs available."))
                 else:
-                    st.error("Failed to enhance resume. Please try again.")
+                    st.error(enhanced_resume_result["message"])
+                    with st.expander("View Gemini error details"):
+                        st.json(enhanced_resume_result["details"])
