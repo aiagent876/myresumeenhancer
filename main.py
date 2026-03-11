@@ -16,19 +16,20 @@ load_dotenv()
 # Fetch the API key from environment variables
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
-# Debug: Print the API key to verify it's loaded correctly
-print("Debug: Loaded API Key:", GEMINI_API_KEY)
+if not GEMINI_API_KEY:
+    st.error("Missing Gemini API key. Please set GEMINI_API_KEY in your environment or .env file.")
+    st.stop()
+
 
 # Set the template directory path relative to the current working directory
 TEMPLATE_DIR = os.path.join(os.getcwd(), "templates")
 
-# Debug: Print the template directory path
-print("Debug: Template Directory:", TEMPLATE_DIR)
 
 # Function to call Gemini API
 def call_gemini_api(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
+    url = "https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent"
     headers = {"Content-Type": "application/json"}
+    params = {"key": GEMINI_API_KEY}
     data = {
         "contents": [{"parts": [{"text": prompt}]}],
         "generationConfig": {
@@ -39,15 +40,9 @@ def call_gemini_api(prompt):
         }
     }
 
-    # Debug: Print the API URL and payload
-    print("Debug: API URL:", url)
-    print("Debug: API Payload:", data)
 
     try:
-        response = requests.post(url, json=data, headers=headers)
-        # Debug: Print the API response status code and content
-        print("Debug: API Response Status Code:", response.status_code)
-        print("Debug: API Response Content:", response.json())
+        response = requests.post(url, params=params, json=data, headers=headers)
 
         if response.status_code == 200:
             return response.json()["candidates"][0]["content"]["parts"][0]["text"]
@@ -67,8 +62,6 @@ def compile_latex_to_pdf(latex_content):
         with open(tex_file_path, "w", encoding="utf-8") as f:
             f.write(latex_content)
         
-        # Debug: Print the LaTeX content being compiled
-        print("Debug: LaTeX Content:", latex_content)
 
         # Copy any required assets from template directory to temp directory
         for file in os.listdir(TEMPLATE_DIR):
@@ -88,9 +81,6 @@ def compile_latex_to_pdf(latex_content):
                     capture_output=True, text=True
                 )
             
-            # Debug: Print the pdflatex output
-            print("Debug: pdflatex Output:", result.stdout)
-            print("Debug: pdflatex Errors:", result.stderr)
 
             # Check if PDF was generated
             pdf_path = Path(temp_dir) / "resume.pdf"
@@ -235,8 +225,6 @@ if uploaded_file:
             The LaTeX code should start with the document class and end with \\end{{document}}.
             """
 
-            # Debug: Print the prompt being sent to the API
-            print("Debug: Prompt Sent to API:", prompt)
 
             with st.spinner("Enhancing your resume... This may take a minute."):
                 enhanced_resume = call_gemini_api(prompt)
