@@ -122,6 +122,12 @@ Symptoms:
 Fixes:
 
 - Install a fuller TeX distribution (e.g., TeX Live packages used in the Dockerfile).
+  - Ubuntu/Debian example:
+    ```bash
+    sudo apt-get update && sudo apt-get install -y \
+      texlive-latex-base texlive-latex-extra texlive-fonts-recommended texlive-fonts-extra
+    ```
+- If deploying on Streamlit Community Cloud, keep the repository `packages.txt` file so these TeX packages are installed automatically during build.
 - If using Docker, rebuild image to ensure TeX packages were installed.
 - Add missing packages referenced by your selected template.
 

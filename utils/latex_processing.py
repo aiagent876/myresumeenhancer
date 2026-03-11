@@ -38,8 +38,9 @@ def compile_latex_to_pdf(latex_content: str, template_dir: str) -> BytesIO | Non
     if not compiler:
         st.error("LaTeX compiler not found: 'pdflatex' is not installed or not on PATH.")
         st.info(
-            "Install a TeX distribution that provides pdflatex (for example TeX Live), "
-            "or run the app with the provided Docker image where LaTeX is preinstalled."
+            "Install a TeX distribution that provides pdflatex (for example TeX Live). "
+            "If you deploy on Streamlit Community Cloud, add the TeX packages to packages.txt. "
+            "You can also run the app with the provided Docker image where LaTeX is preinstalled."
         )
         return None
 
