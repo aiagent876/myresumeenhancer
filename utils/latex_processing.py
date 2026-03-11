@@ -34,6 +34,15 @@ def clean_latex_code(latex_code: str) -> str | None:
 
 def compile_latex_to_pdf(latex_content: str, template_dir: str) -> BytesIO | None:
     """Compile LaTeX to PDF and return an in-memory PDF or ``None`` on error."""
+    compiler = shutil.which("pdflatex")
+    if not compiler:
+        st.error("LaTeX compiler not found: 'pdflatex' is not installed or not on PATH.")
+        st.info(
+            "Install a TeX distribution that provides pdflatex (for example TeX Live), "
+            "or run the app with the provided Docker image where LaTeX is preinstalled."
+        )
+        return None
+
     with tempfile.TemporaryDirectory() as temp_dir:
         temp_path = Path(temp_dir)
         tex_file_path = temp_path / "resume.tex"
@@ -48,12 +57,15 @@ def compile_latex_to_pdf(latex_content: str, template_dir: str) -> BytesIO | Non
             result = None
             for _ in range(2):
                 result = subprocess.run(
-                    ["pdflatex", "-interaction=nonstopmode", "resume.tex"],
+                    [compiler, "-interaction=nonstopmode", "resume.tex"],
                     cwd=temp_dir,
                     capture_output=True,
                     text=True,
                     check=False,
                 )
+        except FileNotFoundError:
+            st.error("LaTeX compiler not found while compiling. Ensure 'pdflatex' is installed and on PATH.")
+            return None
         except Exception as exc:
             st.error(f"Error during PDF compilation: {exc}")
             return None
