@@ -58,17 +58,32 @@ End-to-end flow (resume upload → Gemini prompt → LaTeX → PDF):
 pip install -r requirements.txt
 ```
 
-### 3) Configure environment variables
+### 3) Configure Gemini API key
 
-Create a `.env` file in the project root:
+The app now resolves `GEMINI_API_KEY` in this order:
+
+1. Environment variable `GEMINI_API_KEY` (recommended).
+2. Streamlit secret `GEMINI_API_KEY`.
+3. `api_key.txt` in the project root (single-line key).
+
+Option A — `.env` file in project root:
 
 ```env
 GEMINI_API_KEY=your_api_key_here
 ```
 
-Required environment variables:
+Option B — Streamlit secrets (`.streamlit/secrets.toml`):
 
-- `GEMINI_API_KEY`: Google Gemini API key used for content generation.
+```toml
+GEMINI_API_KEY = "your_api_key_here"
+```
+
+Option C — project file:
+
+```text
+api_key.txt
+# contains only: your_api_key_here
+```
 
 ### 4) Run Streamlit
 

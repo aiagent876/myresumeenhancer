@@ -1,4 +1,5 @@
 import os
+from pathlib import Path
 
 import requests
 import streamlit as st
@@ -7,11 +8,37 @@ from dotenv import load_dotenv
 load_dotenv()
 
 
+def _get_gemini_api_key() -> str | None:
+    """Resolve Gemini API key from env, Streamlit secrets, or local api_key.txt."""
+    env_key = os.getenv("GEMINI_API_KEY")
+    if env_key:
+        return env_key.strip()
+
+    try:
+        secret_key = st.secrets.get("GEMINI_API_KEY")
+        if secret_key:
+            return str(secret_key).strip()
+    except Exception:
+        # st.secrets may be unavailable outside a Streamlit runtime.
+        pass
+
+    key_file = Path(__file__).resolve().parent.parent / "api_key.txt"
+    if key_file.exists():
+        file_key = key_file.read_text(encoding="utf-8").strip()
+        if file_key:
+            return file_key
+
+    return None
+
+
 def call_gemini_api(prompt: str) -> str | None:
     """Call Gemini and return generated text, or ``None`` when unavailable."""
-    api_key = os.getenv("GEMINI_API_KEY")
+    api_key = _get_gemini_api_key()
     if not api_key:
-        st.error("GEMINI_API_KEY is not configured.")
+        st.error(
+            "GEMINI_API_KEY is not configured. Add it as an environment variable, "
+            "Streamlit secret, or put it in api_key.txt at the project root."
+        )
         return None
 
     url = (
