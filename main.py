@@ -1,321 +1,125 @@
-import streamlit as st
-import google.generativeai as genai
-import requests
-import subprocess
+import base64
 import os
-import tempfile
-import shutil
-from pathlib import Path
-import re
-import PyPDF2
-from io import BytesIO
-from dotenv import load_dotenv
 
-# Load environment variables from .env file
-load_dotenv()
+import streamlit as st
 
-# Fetch the API key from environment variables
-GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
+from utils.file_handling import extract_resume_content
+from utils.gemini_api import call_gemini_api
+from utils.latex_processing import clean_latex_code, compile_latex_to_pdf
 
-# Debug: Print the API key to verify it's loaded correctly
-print("Debug: Loaded API Key:", GEMINI_API_KEY)
-
-# Set the template directory path relative to the current working directory
 TEMPLATE_DIR = os.path.join(os.getcwd(), "templates")
 
-# Debug: Print the template directory path
-print("Debug: Template Directory:", TEMPLATE_DIR)
 
-MAX_LATEX_SIZE_BYTES = 250_000
-MAX_OUTPUT_PDF_BYTES = 5_000_000
-COMPILE_TIMEOUT_SECONDS = 20
-MAX_COMPILE_RUNS = 2
-
-DISALLOWED_LATEX_PATTERNS = [
-    (r"\\write18\\b", "\\write18 is not allowed."),
-    (r"\\immediate\\s*\\write18\\b", "Immediate shell write is not allowed."),
-    (r"\\openout\\b", "Writing files from LaTeX is not allowed."),
-    (r"\\input\\s*\|", "Piped input commands are not allowed."),
-    (r"\\include\\s*\|", "Piped include commands are not allowed."),
-    (r"\\(?:input|include)\s*\{\s*(?:/|[A-Za-z]:|\\\\)", "Absolute external paths are not allowed."),
-    (r"\\(?:input|include)\s*\{\s*\.\.", "Parent-directory includes are not allowed."),
-]
-
-# Function to call Gemini API
-def call_gemini_api(prompt):
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/gemini-2.0-flash:generateContent?key={GEMINI_API_KEY}"
-    headers = {"Content-Type": "application/json"}
-    data = {
-        "contents": [{"parts": [{"text": prompt}]}],
-        "generationConfig": {
-            "temperature": 0.2,
-            "topP": 0.8,
-            "topK": 40,
-            "maxOutputTokens": 8192
-        }
-    }
-
-    # Debug: Print the API URL and payload
-    print("Debug: API URL:", url)
-    print("Debug: API Payload:", data)
-
-    try:
-        response = requests.post(url, json=data, headers=headers)
-        # Debug: Print the API response status code and content
-        print("Debug: API Response Status Code:", response.status_code)
-        print("Debug: API Response Content:", response.json())
-
-        if response.status_code == 200:
-            return response.json()["candidates"][0]["content"]["parts"][0]["text"]
-        else:
-            st.error(f"Error calling Gemini API: {response.status_code} - {response.text}")
-            return None
-    except Exception as e:
-        st.error(f"Error during API call: {e}")
-        return None
-
-# Function to compile LaTeX to PDF in an isolated environment
-def compile_latex_to_pdf(latex_content):
-    validation_error = validate_latex_for_compilation(latex_content)
-    if validation_error:
-        st.error(f"Blocked unsafe LaTeX content: {validation_error}")
-        return None
-
-    # Create a temporary directory for compilation
-    with tempfile.TemporaryDirectory() as temp_dir:
-        # Write LaTeX content to a file
-        tex_file_path = Path(temp_dir) / "resume.tex"
-        with open(tex_file_path, "w", encoding="utf-8") as f:
-            f.write(latex_content)
-        
-        # Debug: Print the LaTeX content being compiled
-        print("Debug: LaTeX Content:", latex_content)
-
-        # Copy any required assets from template directory to temp directory
-        for file in os.listdir(TEMPLATE_DIR):
-            if file.endswith(('.sty', '.cls', '.bst', '.ttf', '.otf', '.png', '.jpg')):
-                shutil.copy(os.path.join(TEMPLATE_DIR, file), temp_dir)
-        
-        # Compile LaTeX to PDF
-        try:
-            # Run pdflatex twice to resolve references
-            for _ in range(MAX_COMPILE_RUNS):
-                result = subprocess.run(
-                    [
-                        "pdflatex",
-                        "-interaction=nonstopmode",
-                        "-halt-on-error",
-                        "-no-shell-escape",
-                        "resume.tex",
-                    ],
-                    cwd=temp_dir,
-                    capture_output=True,
-                    text=True,
-                    timeout=COMPILE_TIMEOUT_SECONDS,
-                )
-            
-            # Debug: Print the pdflatex output
-            print("Debug: pdflatex Output:", result.stdout)
-            print("Debug: pdflatex Errors:", result.stderr)
-
-            # Check if PDF was generated
-            pdf_path = Path(temp_dir) / "resume.pdf"
-            if result.returncode == 0 and pdf_path.exists():
-                pdf_size = pdf_path.stat().st_size
-                if pdf_size > MAX_OUTPUT_PDF_BYTES:
-                    st.error("Generated PDF is too large and was blocked.")
-                    return None
-
-                with open(pdf_path, "rb") as pdf_file:
-                    pdf_data = BytesIO(pdf_file.read())
-                return pdf_data
-            else:
-                st.error("PDF compilation failed. Check LaTeX code for errors.")
-                # Show meaningful error message from pdflatex output
-                error_output = result.stdout
-                error_lines = [line for line in error_output.split('\n') if "Error:" in line or "Fatal error" in line]
-                if error_lines:
-                    st.text("\n".join(error_lines))
-                else:
-                    st.text(error_output[-2000:] if error_output else "No error output captured")
-                return None
-        except subprocess.TimeoutExpired:
-            st.error("PDF compilation timed out due to resource limits.")
-            return None
-        except Exception as e:
-            st.error(f"Error during PDF compilation: {e}")
-            return None
-
-
-def validate_latex_for_compilation(latex_content):
-    latex_size = len(latex_content.encode("utf-8"))
-    if latex_size > MAX_LATEX_SIZE_BYTES:
-        return "Input LaTeX is too large."
-
-    for pattern, message in DISALLOWED_LATEX_PATTERNS:
-        if re.search(pattern, latex_content, flags=re.IGNORECASE):
-            return message
-
-    return None
-
-# Load templates
-def load_template(template_name):
+def load_template(template_name: str) -> str | None:
     template_path = os.path.join(TEMPLATE_DIR, f"{template_name}.tex")
     try:
-        with open(template_path, "r", encoding="utf-8") as f:
-            return f.read()
+        with open(template_path, "r", encoding="utf-8") as file:
+            return file.read()
     except FileNotFoundError:
         st.error(f"Template '{template_name}' not found at {template_path}.")
         return None
 
-# Extract text from PDF file
-def extract_text_from_pdf(file):
-    try:
-        pdf_reader = PyPDF2.PdfReader(file)
-        text = ""
-        for page in pdf_reader.pages:
-            text += page.extract_text() + "\n"
-        return text
-    except Exception as e:
-        st.error(f"Error extracting text from PDF: {e}")
-        return ""
 
-# Clean and format LaTeX code from API response
-def clean_latex_code(latex_code):
-    # Remove markdown code blocks if present
-    if "```latex" in latex_code or "```" in latex_code:
-        import re
-        match = re.search(r"```(?:latex)?\s*([\s\S]*?)```", latex_code)
-        if match:
-            latex_code = match.group(1).strip()
-        else:
-            latex_code = latex_code.replace("```latex", "").replace("```", "").strip()
-    
-    # Ensure proper document structure
-    if not "\\begin{document}" in latex_code:
-        st.warning("Generated LaTeX is missing document structure. Using template as base.")
-        return None
-    
-    return latex_code
-
-# Streamlit UI
 st.title("Resume Enhancer with Gemini AI")
 st.write("Upload your resume and paste the job description to generate an enhanced resume.")
 
-# Template selection
 template_choice = st.selectbox("Choose a LaTeX template", ["Classic", "Modern"])
-
-# Resume upload
 uploaded_file = st.file_uploader("Upload your resume (PDF or text)", type=["pdf", "txt"])
 
 if uploaded_file:
-    # Extract resume text
-    if uploaded_file.type == "application/pdf":
-        resume_text = extract_text_from_pdf(uploaded_file)
-    else:
-        resume_text = uploaded_file.read().decode("utf-8")
-    
+    resume_text = extract_resume_content(uploaded_file)
     st.write("Resume uploaded successfully!")
-    
-    # Display a preview of the extracted text
+
     with st.expander("Preview extracted resume text"):
         st.text(resume_text[:1000] + ("..." if len(resume_text) > 1000 else ""))
-    
-    # Job description input
+
     jd = st.text_area("Paste the job description here:")
-    
-    # Additional options
+
     with st.expander("Advanced Options"):
         company_name = st.text_input("Company Name (Optional, will be extracted from JD if not provided)")
         position_name = st.text_input("Position Title (Optional, will be extracted from JD if not provided)")
-    
+
     if st.button("Enhance Resume"):
         if not jd.strip():
             st.warning("Please paste the job description.")
-        else:
-            # Load the selected template
-            selected_template = load_template(template_choice)
-            if not selected_template:
-                st.stop()
-            
-            # Create a more structured prompt for the API
-            prompt = f"""
-            You are a professional resume writer with expertise in LaTeX. Your task is to enhance a resume for a job application by tailoring it to match the specific job description. 
+            st.stop()
 
-            ## TEMPLATE:
-            ```latex
-            {selected_template}
-            ```
+        selected_template = load_template(template_choice)
+        if not selected_template:
+            st.stop()
 
-            ## RESUME CONTENT:
-            ```
-            {resume_text}
-            ```
+        prompt = f"""
+        You are a professional resume writer with expertise in LaTeX. Your task is to enhance a resume for a job application by tailoring it to match the specific job description.
 
-            ## JOB DESCRIPTION:
-            ```
-            {jd}
-            ```
+        ## TEMPLATE:
+        ```latex
+        {selected_template}
+        ```
 
-            ## COMPANY AND POSITION DETAILS:
-            Company: {company_name if company_name else "Extract from job description"}
-            Position: {position_name if position_name else "Extract from job description"}
+        ## RESUME CONTENT:
+        ```
+        {resume_text}
+        ```
 
-            ## INSTRUCTIONS:
-            1. Create a complete LaTeX resume document using the provided template.
-            2. Tailor the content to highlight skills and experiences that match the job description.
-            3. Keep the original LaTeX structure and commands intact.
-            4. Ensure all LaTeX special characters are properly escaped.
-            5. Focus on skills and experiences most relevant to the job description.
-            6. Ensure the document compiles correctly without errors.
-            7. Return ONLY the complete LaTeX code with no explanations or markdown.
+        ## JOB DESCRIPTION:
+        ```
+        {jd}
+        ```
 
-            The LaTeX code should start with the document class and end with \\end{{document}}.
-            """
+        ## COMPANY AND POSITION DETAILS:
+        Company: {company_name if company_name else "Extract from job description"}
+        Position: {position_name if position_name else "Extract from job description"}
 
-            # Debug: Print the prompt being sent to the API
-            print("Debug: Prompt Sent to API:", prompt)
+        ## INSTRUCTIONS:
+        1. Create a complete LaTeX resume document using the provided template.
+        2. Tailor the content to highlight skills and experiences that match the job description.
+        3. Keep the original LaTeX structure and commands intact.
+        4. Ensure all LaTeX special characters are properly escaped.
+        5. Focus on skills and experiences most relevant to the job description.
+        6. Ensure the document compiles correctly without errors.
+        7. Return ONLY the complete LaTeX code with no explanations or markdown.
 
-            with st.spinner("Enhancing your resume... This may take a minute."):
-                enhanced_resume = call_gemini_api(prompt)
-                if enhanced_resume:
-                    # Clean up the LaTeX code
-                    clean_resume = clean_latex_code(enhanced_resume)
-                    
-                    if clean_resume is None:
-                        # Use the original template as a base and try to insert the content
-                        st.warning("Using the original template as a base. Some customization may be lost.")
-                        clean_resume = enhanced_resume
-                    
-                    st.success("Resume enhanced successfully!")
-                    
-                    # Display LaTeX code
-                    with st.expander("View LaTeX Code"):
-                        st.code(clean_resume, language="latex")
-                    
-                    # Compile the LaTeX code to PDF
-                    with st.spinner("Compiling PDF..."):
-                        pdf_data = compile_latex_to_pdf(clean_resume)
-                        
-                    if pdf_data:
-                        st.success("PDF compiled successfully!")
-                        st.download_button(
-                            label="📥 Download Enhanced Resume (PDF)",
-                            data=pdf_data,
-                            file_name="enhanced_resume.pdf",
-                            mime="application/pdf"
-                        )
-                        
-                        # Display a preview of the PDF
-                        st.write("PDF Preview:")
-                        st.write("(If the preview doesn't appear, you can still download the PDF using the button above)")
-                        
-                        # Create a base64 encoded PDF for display
-                        import base64
-                        base64_pdf = base64.b64encode(pdf_data.getvalue()).decode('utf-8')
-                        pdf_display = f'<iframe src="data:application/pdf;base64,{base64_pdf}" width="700" height="1000" type="application/pdf"></iframe>'
-                        st.markdown(pdf_display, unsafe_allow_html=True)
-                    else:
-                        st.error("Failed to compile PDF. Please check for LaTeX errors.")
-                else:
-                    st.error("Failed to enhance resume. Please try again.")
+        The LaTeX code should start with the document class and end with \\end{{document}}.
+        """
+
+        with st.spinner("Enhancing your resume... This may take a minute."):
+            enhanced_resume = call_gemini_api(prompt)
+
+        if not enhanced_resume:
+            st.error("Failed to enhance resume. Please try again.")
+            st.stop()
+
+        clean_resume = clean_latex_code(enhanced_resume)
+        if clean_resume is None:
+            st.warning("Using raw model output because cleaned LaTeX could not be validated.")
+            clean_resume = enhanced_resume
+
+        st.success("Resume enhanced successfully!")
+
+        with st.expander("View LaTeX Code"):
+            st.code(clean_resume, language="latex")
+
+        with st.spinner("Compiling PDF..."):
+            pdf_data = compile_latex_to_pdf(clean_resume, TEMPLATE_DIR)
+
+        if not pdf_data:
+            st.error("Failed to compile PDF. Please check for LaTeX errors.")
+            st.stop()
+
+        st.success("PDF compiled successfully!")
+        st.download_button(
+            label="📥 Download Enhanced Resume (PDF)",
+            data=pdf_data,
+            file_name="enhanced_resume.pdf",
+            mime="application/pdf",
+        )
+
+        st.write("PDF Preview:")
+        st.write("(If the preview doesn't appear, you can still download the PDF using the button above)")
+
+        base64_pdf = base64.b64encode(pdf_data.getvalue()).decode("utf-8")
+        pdf_display = (
+            f'<iframe src="data:application/pdf;base64,{base64_pdf}" '
+            'width="700" height="1000" type="application/pdf"></iframe>'
+        )
+        st.markdown(pdf_display, unsafe_allow_html=True)
