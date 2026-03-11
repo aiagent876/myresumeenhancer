@@ -7,7 +7,6 @@ from utils.file_handling import extract_resume_content
 from utils.gemini_api import call_gemini_api
 from utils.latex_processing import clean_latex_code, compile_latex_to_pdf
 
-# Set the template directory path relative to the current working directory
 TEMPLATE_DIR = os.path.join(os.getcwd(), "templates")
 
 
@@ -15,21 +14,17 @@ TEMPLATE_DIR = os.path.join(os.getcwd(), "templates")
 def load_template(template_name: str) -> str | None:
     template_path = os.path.join(TEMPLATE_DIR, f"{template_name}.tex")
     try:
-        with open(template_path, "r", encoding="utf-8") as f:
-            return f.read()
+        with open(template_path, "r", encoding="utf-8") as file:
+            return file.read()
     except FileNotFoundError:
         st.error(f"Template '{template_name}' not found at {template_path}.")
         return None
 
 
-# Streamlit UI
 st.title("Resume Enhancer with Gemini AI")
 st.write("Upload your resume and paste the job description to generate an enhanced resume.")
 
-# Template selection
 template_choice = st.selectbox("Choose a LaTeX template", ["Classic", "Modern"])
-
-# Resume upload
 uploaded_file = st.file_uploader("Upload your resume (PDF or text)", type=["pdf", "txt"])
 
 if uploaded_file:
